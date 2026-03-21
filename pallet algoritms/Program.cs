@@ -16,13 +16,13 @@
             var config = PackingConfig.Default();
             var algorithm = new PalletsAlgorithms(config);
 
-            var result = algorithm.BestPaalletFit(items, pallets, rule);
+            var result = algorithm.BestPalletFit(items, pallets, rule);
 
             Console.WriteLine("===== USED PALLETS =====");
             foreach (var pallet in result.OrderBy(x => x.PalletId))
             {
                 Console.WriteLine($"PalletId={pallet.PalletId}, Type={pallet.PalletType}");
-                Console.WriteLine($"  UsedVolume = {pallet.Valume:N2}/{pallet.PalletVolume:N2}");
+                Console.WriteLine($"  UsedVolume = {pallet.Volume:N2}/{pallet.PalletVolume:N2}");
                 Console.WriteLine($"  UsedWeight = {pallet.Weight:N2}/{pallet.PalletWeight:N2}");
                 Console.WriteLine($"  UsedHeight = {pallet.Height:N2}/{pallet.PalletHeight:N2}");
                 Console.WriteLine($"  ItemsCount = {pallet.Items.Count}");
@@ -135,7 +135,7 @@
         public int PalletId { get; set; }
         public int PalletType { get; set; }
 
-        public decimal Valume { get; set; }
+        public decimal Volume { get; set; }
         public decimal PalletVolume { get; set; }
 
         public decimal PalletWeight { get; set; }
@@ -183,13 +183,16 @@
             _engine = new PackingEngine(config ?? PackingConfig.Default());
         }
 
-        public List<SelectedPalletResult> BestPaalletFit(List<Items> items, List<Pallets> pallets, Rule rule)
+        public List<SelectedPalletResult> BestPalletFit(List<Items> items, List<Pallets> pallets, Rule rule)
         {
             var result = _engine.Run(items, pallets, rule);
             LastUnplacedItems = result.UnplacedItems;
             LastRejectStatistics = result.RejectStatistics;
             return result.UsedPallets;
         }
+
+        public List<SelectedPalletResult> BestPaalletFit(List<Items> items, List<Pallets> pallets, Rule rule) =>
+            BestPalletFit(items, pallets, rule);
     }
 
     #endregion
@@ -284,7 +287,7 @@
                             continue;
                         }
 
-                        var candidate = FindBestPlacement(item, pallet, group, rule, itemRejects);
+                        var candidate = FindBestPlacement(item, pallet, itemRejects);
                         if (candidate == null)
                             continue;
 
@@ -305,8 +308,7 @@
                         continue;
                     }
 
-                    BusinessRuleService.LockPalletForGroup(bestCandidate.Pallet, group, rule, item);
-                    ApplyPlacement(bestCandidate);
+                    ApplyPlacement(bestCandidate.Pallet, bestCandidate.Placement, rule, item, bestCandidate.DecisionNote);
 
                     if (ShouldClosePallet(bestCandidate.Pallet))
                         bestCandidate.Pallet.IsClosed = true;
@@ -330,14 +332,20 @@
         private PlacementCandidate? FindBestPlacement(
             Items item,
             WorkingPallet pallet,
-            PlacementGroup group,
-            Rule rule,
             Dictionary<string, int> rejectCollector)
         {
-            PlacementCandidate? best = null;
+            var candidatePoints = _candidatePointService.GetCandidatePoints(pallet).ToList();
+
+            if (candidatePoints.Count == 0)
+            {
+                AddReject(rejectCollector, RejectReason.NoCandidatePoint);
+                return null;
+            }
 
             foreach (var orientation in _orientationService.GetAllowedOrientations(item))
             {
+                PlacementCandidate? bestForOrientation = null;
+
                 if (orientation.L > pallet.Template.Lenght ||
                     orientation.W > pallet.Template.Width ||
                     orientation.H > pallet.AvailableHeight)
@@ -346,7 +354,7 @@
                     continue;
                 }
 
-                foreach (var point in _candidatePointService.GetCandidatePoints(pallet))
+                foreach (var point in candidatePoints)
                 {
                     var placement = new Placement3D
                     {
@@ -376,20 +384,21 @@
                         DecisionNote = validation.Note
                     };
 
-                    if (best == null || candidate.Score < best.Score)
-                        best = candidate;
+                    if (bestForOrientation == null || candidate.Score < bestForOrientation.Score)
+                        bestForOrientation = candidate;
                 }
+
+                if (bestForOrientation != null)
+                    return bestForOrientation;
             }
 
-            return best;
+            return null;
         }
 
-        private static void ApplyPlacement(PlacementCandidate candidate)
+        private static void ApplyPlacement(WorkingPallet pallet, Placement3D placement, Rule rule, Items item, string debugNote)
         {
-            var pallet = candidate.Pallet;
-            var placement = candidate.Placement;
-
-            pallet.AddPlacement(placement, isPreloaded: false, debugNote: candidate.DecisionNote);
+            BusinessRuleService.LockPalletForItem(pallet, rule, item);
+            pallet.AddPlacement(placement, isPreloaded: false, debugNote: debugNote);
         }
 
         private bool ShouldClosePallet(WorkingPallet pallet)
@@ -412,10 +421,8 @@
         private static void AddReject(Dictionary<string, int> collector, RejectReason reason)
         {
             var key = reason.ToString();
-            if (!collector.ContainsKey(key))
-                collector[key] = 0;
-
-            collector[key]++;
+            collector.TryGetValue(key, out var count);
+            collector[key] = count + 1;
         }
 
         private static SelectedPalletResult ToResult(WorkingPallet pallet)
@@ -424,7 +431,7 @@
             {
                 PalletId = pallet.Template.PalletId,
                 PalletType = pallet.Template.PalletType,
-                Valume = pallet.Template.UseValume,
+                Volume = pallet.Template.UseValume,
                 PalletVolume = pallet.Template.MaxValume,
                 PalletWeight = pallet.Template.MaxWeight,
                 Weight = pallet.Template.UseWeight,
@@ -692,10 +699,28 @@
                 return;
             }
 
-            if (item.ItemType == 2)
+            LockPalletForItem(pallet, rule, item);
+        }
+
+        public static void LockPalletForItem(WorkingPallet pallet, Rule rule, Items item)
+        {
+            if (!rule.IsMixedStock)
             {
-                pallet.LockedLotKey ??= GetLotKey(item, rule);
+                pallet.LockedItemNo ??= item.ItemNo;
+                return;
             }
+
+            if (item.ItemType == 2)
+                pallet.LockedLotKey ??= GetLotKey(item, rule);
+        }
+
+        public static void RefreshPalletLocks(WorkingPallet pallet, Rule rule)
+        {
+            pallet.LockedItemNo = null;
+            pallet.LockedLotKey = null;
+
+            foreach (var item in pallet.PlacedItems)
+                LockPalletForItem(pallet, rule, item);
         }
 
         public static string GetLotKey(Items item, Rule rule)
@@ -719,8 +744,6 @@
     {
         public IEnumerable<Orientation> GetAllowedOrientations(Items item)
         {
-            // Faqat chap/o'ng aylantirish.
-            // Height o'zgarmaydi.
             return new[]
             {
                 new Orientation(item.Length, item.Width, item.Height),
@@ -729,6 +752,8 @@
             .GroupBy(x => $"{x.L:F4}|{x.W:F4}|{x.H:F4}")
             .Select(g => g.First())
             .OrderByDescending(x => x.L * x.W)
+            .ThenBy(x => x.W)
+            .ThenBy(x => x.L)
             .ToList();
         }
     }
@@ -744,52 +769,55 @@
 
         public IEnumerable<Point3D> GetCandidatePoints(WorkingPallet pallet)
         {
-            var points = new List<Point3D>();
-
             if (pallet.Placements.Count == 0)
+                return new[] { new Point3D(0, 0, pallet.BaseZ) };
+
+            var xAnchors = new HashSet<decimal> { 0m };
+            var yAnchors = new HashSet<decimal> { 0m };
+            var zAnchors = new HashSet<decimal> { pallet.BaseZ };
+
+            foreach (var p in pallet.Placements)
             {
-                points.Add(new Point3D(0, 0, pallet.BaseZ));
+                xAnchors.Add(p.X);
+                xAnchors.Add(p.Right);
+
+                yAnchors.Add(p.Y);
+                yAnchors.Add(p.Back);
+
+                zAnchors.Add(p.Z);
+                zAnchors.Add(p.Top);
             }
-            else
+
+            var points = new List<Point3D>();
+            foreach (var x in xAnchors)
             {
-                foreach (var p in pallet.Placements)
+                foreach (var y in yAnchors)
                 {
-                    points.Add(new Point3D(p.Right, p.Y, p.Z));
-                    points.Add(new Point3D(p.X, p.Back, p.Z));
-                    points.Add(new Point3D(p.X, p.Y, p.Top));
+                    foreach (var z in zAnchors)
+                    {
+                        if (x < 0 || y < 0 || z < pallet.BaseZ)
+                            continue;
+
+                        if (x > pallet.Template.Lenght || y > pallet.Template.Width || z > pallet.Template.MaxHeight)
+                            continue;
+
+                        points.Add(new Point3D(x, y, z));
+                    }
                 }
-
-                // base z dagi origin point ba'zan foydali bo'ladi
-                points.Add(new Point3D(0, 0, pallet.BaseZ));
             }
 
-            var dedup = points
-                .Where(pt => pt.X >= 0 && pt.Y >= 0 && pt.Z >= pallet.BaseZ)
-                .Where(pt => pt.X <= pallet.Template.Lenght && pt.Y <= pallet.Template.Width && pt.Z <= pallet.Template.MaxHeight)
+            return points
                 .GroupBy(pt => $"{pt.X:F4}|{pt.Y:F4}|{pt.Z:F4}")
-                .Select(g => g.First());
-
-            // Dominated point pruning:
-            // agar boshqa point hamma o'qda <= bo'lsa, undan yomon pointni tashlaymiz
-            var list = dedup
+                .Select(g => g.First())
                 .OrderBy(pt => pt.Z)
-                .ThenBy(pt => pt.Y)
+                .ThenBy(pt => pt.X + pt.Y)
                 .ThenBy(pt => pt.X)
-                .ToList();
-
-            var pruned = new List<Point3D>();
-            foreach (var p in list)
-            {
-                bool dominated = pruned.Any(q => q.X <= p.X && q.Y <= p.Y && q.Z <= p.Z);
-                if (!dominated)
-                    pruned.Add(p);
-            }
-
-            return pruned
+                .ThenBy(pt => pt.Y)
                 .Take(_config.MaxCandidatePointsPerPallet)
                 .ToList();
         }
     }
+
 
     #endregion
 
@@ -956,6 +984,7 @@
         DimensionOverflow,
         VolumeCapacity,
         WeightCapacity,
+        NoCandidatePoint,
         Overlap,
         Support,
         CenterOfGravity,
@@ -1000,13 +1029,23 @@
                 Math.Abs(placement.CenterX - centerX) +
                 Math.Abs(placement.CenterY - centerY);
 
-            decimal zPenalty = placement.Z * 500m;
-            decimal topPenalty = newTop * 100m;
+            decimal emptyPalletPenalty = pallet.NonPreloadedPlacementCount == 0 ? 100000m : 0m;
+            decimal zPenalty = placement.Z * 40m;
+            decimal topPenalty = newTop * 8m;
+            decimal travelPenalty = (placement.X + placement.Y) * 2m;
             decimal remainPenalty = remainVolume * 0.00001m;
+            decimal utilizationReward = pallet.NonPreloadedPlacementCount * 250m;
 
-            return zPenalty + topPenalty + distToCenterPenalty + remainPenalty;
+            return emptyPalletPenalty
+                + zPenalty
+                + topPenalty
+                + travelPenalty
+                + distToCenterPenalty
+                + remainPenalty
+                - utilizationReward;
         }
     }
+
 
     #endregion
 
@@ -1074,6 +1113,10 @@
                     if (!CanMoveBetweenPallets(source, target, oldPlacement.Item, rule))
                         continue;
 
+                    var candidatePoints = _candidatePointService.GetCandidatePoints(target).ToList();
+                    if (candidatePoints.Count == 0)
+                        continue;
+
                     foreach (var orientation in _orientationService.GetAllowedOrientations(oldPlacement.Item))
                     {
                         if (orientation.L > target.Template.Lenght ||
@@ -1081,7 +1124,7 @@
                             orientation.H > target.AvailableHeight)
                             continue;
 
-                        foreach (var point in _candidatePointService.GetCandidatePoints(target))
+                        foreach (var point in candidatePoints)
                         {
                             var candidatePlacement = new Placement3D
                             {
@@ -1120,17 +1163,23 @@
                     {
                         m.Target.RemovePlacement(m.NewPlacement);
                         source.AddPlacement(m.OldPlacement, isPreloaded: false, debugNote: "Rollback");
+                        BusinessRuleService.RefreshPalletLocks(m.Target, rule);
                     }
+                    BusinessRuleService.RefreshPalletLocks(source, rule);
                     return false;
                 }
 
                 source.RemovePlacement(oldPlacement);
+                BusinessRuleService.RefreshPalletLocks(source, rule);
+                BusinessRuleService.LockPalletForItem(best.Pallet, rule, oldPlacement.Item);
                 best.Pallet.AddPlacement(best.Placement, isPreloaded: false, debugNote: "LocalOptimization");
+                BusinessRuleService.RefreshPalletLocks(best.Pallet, rule);
                 moved.Add((oldPlacement, best.Pallet, best.Placement));
             }
 
             // source bo'shagan bo'lsa uni yopamiz
             source.IsClosed = true;
+            BusinessRuleService.RefreshPalletLocks(source, rule);
             source.DebugNotes.Add("Merged away by local optimization.");
             return true;
         }
@@ -1166,6 +1215,7 @@
         public bool IsClosed { get; set; }
         public int? LockedItemNo { get; set; }
         public string? LockedLotKey { get; set; }
+        public bool HasPreloadedGeometry => Template.ExistingPlacements.Count > 0;
 
         public List<Placement3D> Placements { get; } = [];
         public List<Items> PlacedItems { get; } = [];
@@ -1184,6 +1234,7 @@
         {
             Template = pallet;
             _config = config;
+            BaseZ = pallet.ExistingPlacements.Count > 0 ? 0m : pallet.UseHeight;
             SpatialIndex = new SpatialHash3D(config);
         }
 
@@ -1193,6 +1244,10 @@
 
             if (pallet.ExistingPlacements != null && pallet.ExistingPlacements.Count > 0)
             {
+                wp.Template.UseValume = 0;
+                wp.Template.UseWeight = 0;
+                wp.Template.UseHeight = 0;
+
                 foreach (var ep in pallet.ExistingPlacements)
                 {
                     var fakeItem = new Items
@@ -1225,7 +1280,7 @@
             return wp;
         }
 
-        public decimal BaseZ => Template.ExistingPlacements.Count > 0 ? 0m : Template.UseHeight;
+        public decimal BaseZ { get; }
         public decimal AvailableHeight => Template.MaxHeight - BaseZ;
         public decimal CurrentTop => Placements.Count == 0 ? BaseZ : Math.Max(BaseZ, Placements.Max(x => x.Top));
         public decimal TotalWeight => Template.UseWeight;
@@ -1297,9 +1352,9 @@
                 MaxWeight = p.MaxWeight,
                 Lenght = p.Lenght,
                 Width = p.Width,
-                UseValume = p.UseValume,
-                UseHeight = p.UseHeight,
-                UseWeight = p.UseWeight,
+                UseValume = p.ExistingPlacements.Count > 0 ? 0 : p.UseValume,
+                UseHeight = p.ExistingPlacements.Count > 0 ? 0 : p.UseHeight,
+                UseWeight = p.ExistingPlacements.Count > 0 ? 0 : p.UseWeight,
                 LengthQual_id = p.LengthQual_id,
                 VolumeQual_id = p.VolumeQual_id,
                 WeightQual_id = p.WeightQual_id,
@@ -1448,10 +1503,12 @@
                 {
                     PalletId = 1,
                     PalletType = 101,
-                    Lenght = 120,
+
+                    Lenght = 130,
                     Width = 100,
                     MaxHeight = 160,
-                    MaxValume = 120m * 100m * 160m,
+
+                    MaxValume = 130m * 100m * 160m,
                     MaxWeight = 700,
                     UseValume = 0,
                     UseHeight = 0,
@@ -1469,28 +1526,17 @@
                     UseValume = 0,
                     UseHeight = 0,
                     UseWeight = 0,
-                    ExistingPlacements =
-                    [
-                        new ExistingPlacementInput
-                        {
-                            ItemNo = 9001,
-                            Weight = 40,
-                            X = 0,
-                            Y = 0,
-                            Z = 0,
-                            Length = 40,
-                            Width = 40,
-                            Height = 30
-                        }
-                    ]
+
                 },
                 new Pallets
                 {
                     PalletId = 3,
                     PalletType = 103,
+
                     Lenght = 100,
                     Width = 80,
                     MaxHeight = 140,
+
                     MaxValume = 100m * 80m * 140m,
                     MaxWeight = 450,
                     UseValume = 0,
@@ -1508,10 +1554,12 @@
                 {
                     ItemNo = 10,
                     Weight = 12,
-                    Length = 40,
-                    Width = 30,
+
+                    Length = 60,
+                    Width = 50,
                     Height = 20,
-                    Volume = 40m * 30m * 20m,
+
+                    Volume = 60m * 50m * 20m,
                     Quantity = 10,
                     ItemType = 1,
                     ProdDate = new DateOnly(2026, 3, 1),
@@ -1521,108 +1569,108 @@
                     TrxB_id = 1,
                     CDO_name = "STD"
                 },
-                new Items
-                {
-                    ItemNo = 11,
-                    Weight = 10,
-                    Length = 35,
-                    Width = 25,
-                    Height = 15,
-                    Volume = 35m * 25m * 15m,
-                    Quantity = 24,
-                    ItemType = 1,
-                    ProdDate = new DateOnly(2026, 3, 1),
-                    ExpDate = new DateOnly(2027, 3, 1),
-                    ReceiptDate = new DateOnly(2026, 3, 4),
-                    ProdBatchNo = "A1",
-                    TrxB_id = 2,
-                    CDO_name = "STD"
-                },
-                new Items
-                {
-                    ItemNo = 10,
-                    Weight = 12,
-                    Length = 40,
-                    Width = 30,
-                    Height = 20,
-                    Volume = 40m * 30m * 20m,
-                    Quantity = 5,
-                    ItemType = 1,
-                    ProdDate = new DateOnly(2026, 3, 1),
-                    ExpDate = new DateOnly(2027, 3, 1),
-                    ReceiptDate = new DateOnly(2026, 3, 4),
-                    ProdBatchNo = "A1",
-                    TrxB_id = 3,
-                    CDO_name = "STD"
-                },
-                new Items
-                {
-                    ItemNo = 20,
-                    Weight = 8,
-                    Length = 25,
-                    Width = 20,
-                    Height = 18,
-                    Volume = 25m * 20m * 18m,
-                    Quantity = 16,
-                    ItemType = 2,
-                    ProdDate = new DateOnly(2026, 2, 10),
-                    ExpDate = new DateOnly(2026, 9, 1),
-                    ReceiptDate = new DateOnly(2026, 2, 15),
-                    ProdBatchNo = "LOT-X",
-                    TrxB_id = 4,
-                    CDO_name = "LOT"
-                },
-                new Items
-                {
-                    ItemNo = 21,
-                    Weight = 9,
-                    Length = 26,
-                    Width = 22,
-                    Height = 16,
-                    Volume = 26m * 22m * 16m,
-                    Quantity = 12,
-                    ItemType = 2,
-                    ProdDate = new DateOnly(2026, 2, 10),
-                    ExpDate = new DateOnly(2026, 10, 1),
-                    ReceiptDate = new DateOnly(2026, 2, 16),
-                    ProdBatchNo = "LOT-X",
-                    TrxB_id = 5,
-                    CDO_name = "LOT"
-                },
-                new Items
-                {
-                    ItemNo = 22,
-                    Weight = 9,
-                    Length = 26,
-                    Width = 22,
-                    Height = 16,
-                    Volume = 26m * 22m * 16m,
-                    Quantity = 10,
-                    ItemType = 2,
-                    ProdDate = new DateOnly(2026, 2, 11),
-                    ExpDate = new DateOnly(2026, 10, 1),
-                    ReceiptDate = new DateOnly(2026, 2, 16),
-                    ProdBatchNo = "LOT-Y",
-                    TrxB_id = 6,
-                    CDO_name = "LOT"
-                },
-                new Items
-                {
-                    ItemNo = 30,
-                    Weight = 7,
-                    Length = 20,
-                    Width = 20,
-                    Height = 20,
-                    Volume = 20m * 20m * 20m,
-                    Quantity = 25,
-                    ItemType = 3,
-                    ProdDate = new DateOnly(2026, 1, 1),
-                    ExpDate = new DateOnly(2028, 1, 1),
-                    ReceiptDate = new DateOnly(2026, 3, 1),
-                    ProdBatchNo = "FREE-1",
-                    TrxB_id = 7,
-                    CDO_name = "FREE"
-                }
+                //new Items
+                //{
+                //    ItemNo = 11,
+                //    Weight = 10,
+                //    Length = 35,
+                //    Width = 25,
+                //    Height = 15,
+                //    Volume = 35m * 25m * 15m,
+                //    Quantity = 24,
+                //    ItemType = 1,
+                //    ProdDate = new DateOnly(2026, 3, 1),
+                //    ExpDate = new DateOnly(2027, 3, 1),
+                //    ReceiptDate = new DateOnly(2026, 3, 4),
+                //    ProdBatchNo = "A1",
+                //    TrxB_id = 2,
+                //    CDO_name = "STD"
+                //},
+                //new Items
+                //{
+                //    ItemNo = 10,
+                //    Weight = 12,
+                //    Length = 40,
+                //    Width = 30,
+                //    Height = 20,
+                //    Volume = 40m * 30m * 20m,
+                //    Quantity = 5,
+                //    ItemType = 1,
+                //    ProdDate = new DateOnly(2026, 3, 1),
+                //    ExpDate = new DateOnly(2027, 3, 1),
+                //    ReceiptDate = new DateOnly(2026, 3, 4),
+                //    ProdBatchNo = "A1",
+                //    TrxB_id = 3,
+                //    CDO_name = "STD"
+                //},
+                //new Items
+                //{
+                //    ItemNo = 20,
+                //    Weight = 8,
+                //    Length = 25,
+                //    Width = 20,
+                //    Height = 18,
+                //    Volume = 25m * 20m * 18m,
+                //    Quantity = 16,
+                //    ItemType = 2,
+                //    ProdDate = new DateOnly(2026, 2, 10),
+                //    ExpDate = new DateOnly(2026, 9, 1),
+                //    ReceiptDate = new DateOnly(2026, 2, 15),
+                //    ProdBatchNo = "LOT-X",
+                //    TrxB_id = 4,
+                //    CDO_name = "LOT"
+                //},
+                //new Items
+                //{
+                //    ItemNo = 21,
+                //    Weight = 9,
+                //    Length = 26,
+                //    Width = 22,
+                //    Height = 16,
+                //    Volume = 26m * 22m * 16m,
+                //    Quantity = 12,
+                //    ItemType = 2,
+                //    ProdDate = new DateOnly(2026, 2, 10),
+                //    ExpDate = new DateOnly(2026, 10, 1),
+                //    ReceiptDate = new DateOnly(2026, 2, 16),
+                //    ProdBatchNo = "LOT-X",
+                //    TrxB_id = 5,
+                //    CDO_name = "LOT"
+                //},
+                //new Items
+                //{
+                //    ItemNo = 22,
+                //    Weight = 9,
+                //    Length = 26,
+                //    Width = 22,
+                //    Height = 16,
+                //    Volume = 26m * 22m * 16m,
+                //    Quantity = 10,
+                //    ItemType = 2,
+                //    ProdDate = new DateOnly(2026, 2, 11),
+                //    ExpDate = new DateOnly(2026, 10, 1),
+                //    ReceiptDate = new DateOnly(2026, 2, 16),
+                //    ProdBatchNo = "LOT-Y",
+                //    TrxB_id = 6,
+                //    CDO_name = "LOT"
+                //},
+                //new Items
+                //{
+                //    ItemNo = 30,
+                //    Weight = 7,
+                //    Length = 20,
+                //    Width = 20,
+                //    Height = 20,
+                //    Volume = 20m * 20m * 20m,
+                //    Quantity = 25,
+                //    ItemType = 3,
+                //    ProdDate = new DateOnly(2026, 1, 1),
+                //    ExpDate = new DateOnly(2028, 1, 1),
+                //    ReceiptDate = new DateOnly(2026, 3, 1),
+                //    ProdBatchNo = "FREE-1",
+                //    TrxB_id = 7,
+                //    CDO_name = "FREE"
+                //}
             ];
         }
     }
