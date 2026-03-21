@@ -28,6 +28,46 @@
                 Console.WriteLine($"  ItemsCount = {pallet.Items.Count}");
                 Console.WriteLine($"  Placements = {pallet.Placements.Count}");
 
+                Console.WriteLine("  Layers:");
+                foreach (var layer in pallet.Placements
+                    .GroupBy(p => p.Z)
+                    .OrderBy(g => g.Key)
+                    .Select((g, index) => new { LayerNo = index + 1, BaseZ = g.Key, Items = g.ToList() }))
+                {
+                    Console.WriteLine($"    Layer {layer.LayerNo} (Z={layer.BaseZ:N2}, Count={layer.Items.Count})");
+
+                    foreach (var g in layer.Items
+                        .GroupBy(p => new { p.ItemNo, p.Length, p.Width, p.Height })
+                        .OrderBy(g => g.Key.ItemNo)
+                        .ThenBy(g => g.Key.Length)
+                        .ThenBy(g => g.Key.Width))
+                    {
+                        Console.WriteLine(
+                            $"      ItemNo={g.Key.ItemNo}, Qty={g.Count()}, Size={g.Key.Length}x{g.Key.Width}x{g.Key.Height}");
+                    }
+
+                    Console.WriteLine("      Positions:");
+                    foreach (var placement in layer.Items
+                        .OrderBy(p => p.Y)
+                        .ThenBy(p => p.X)
+                        .ThenBy(p => p.ItemNo))
+                    {
+                        Console.WriteLine(
+                            $"        ItemNo={placement.ItemNo} at X={placement.X}, Y={placement.Y}, Z={placement.Z}, Size={placement.Length}x{placement.Width}x{placement.Height}");
+                    }
+
+                    Console.WriteLine("      Layout:");
+                    foreach (var row in layer.Items
+                        .GroupBy(p => p.Y)
+                        .OrderBy(g => g.Key))
+                    {
+                        var rowText = string.Join(" | ", row
+                            .OrderBy(p => p.X)
+                            .Select(p => $"[{p.ItemNo}@X{p.X}:{p.Length}x{p.Width}]"));
+                        Console.WriteLine($"        Y={row.Key}: {rowText}");
+                    }
+                }
+
                 foreach (var g in pallet.Items
                     .GroupBy(i => new { i.ItemNo, i.ItemType, i.ProdBatchNo, i.ProdDate, i.ExpDate, i.ReceiptDate })
                     .OrderBy(g => g.Key.ItemNo))
@@ -255,63 +295,83 @@
 
             foreach (var group in groups)
             {
-                var orderedUnits = group.Units
+                var remainingUnits = group.Units
                     .OrderByDescending(x => x.Volume)
                     .ThenByDescending(x => Math.Max(x.Length, Math.Max(x.Width, x.Height)))
                     .ThenByDescending(x => x.Weight)
                     .ThenBy(x => x.ItemNo)
                     .ToList();
 
-                foreach (var item in orderedUnits)
+                while (remainingUnits.Count > 0)
                 {
                     PlacementCandidate? bestCandidate = null;
-                    var itemRejects = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    Items? selectedItem = null;
+                    var rejectMap = new Dictionary<Items, Dictionary<string, int>>();
 
-                    foreach (var pallet in statePallets)
+                    foreach (var item in remainingUnits)
                     {
-                        if (pallet.IsClosed)
-                            continue;
+                        var itemRejects = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                        rejectMap[item] = itemRejects;
 
-                        if (!BusinessRuleService.CanPalletAcceptGroup(pallet, group, rule))
-                            continue;
-
-                        if (pallet.TotalWeight + item.Weight > pallet.Template.MaxWeight)
+                        foreach (var pallet in statePallets)
                         {
-                            AddReject(itemRejects, RejectReason.WeightCapacity);
-                            continue;
+                            if (pallet.IsClosed)
+                                continue;
+
+                            if (!BusinessRuleService.CanPalletAcceptGroup(pallet, group, rule))
+                                continue;
+
+                            if (pallet.TotalWeight + item.Weight > pallet.Template.MaxWeight)
+                            {
+                                AddReject(itemRejects, RejectReason.WeightCapacity);
+                                continue;
+                            }
+
+                            if (pallet.Template.UseValume + item.Volume > pallet.Template.MaxValume)
+                            {
+                                AddReject(itemRejects, RejectReason.VolumeCapacity);
+                                continue;
+                            }
+
+                            var candidate = FindBestPlacement(item, pallet, itemRejects);
+                            if (candidate == null)
+                                continue;
+
+                            if (bestCandidate == null || candidate.Score < bestCandidate.Score)
+                            {
+                                bestCandidate = candidate;
+                                selectedItem = item;
+                            }
                         }
-
-                        if (pallet.Template.UseValume + item.Volume > pallet.Template.MaxValume)
-                        {
-                            AddReject(itemRejects, RejectReason.VolumeCapacity);
-                            continue;
-                        }
-
-                        var candidate = FindBestPlacement(item, pallet, itemRejects);
-                        if (candidate == null)
-                            continue;
-
-                        if (bestCandidate == null || candidate.Score < bestCandidate.Score)
-                            bestCandidate = candidate;
                     }
 
-                    if (bestCandidate == null)
+                    if (bestCandidate == null || selectedItem == null)
                     {
-                        unplaced.Add(item);
-                        foreach (var kv in itemRejects)
+                        foreach (var item in remainingUnits)
                         {
-                            if (!rejectStats.ContainsKey(kv.Key))
-                                rejectStats[kv.Key] = 0;
+                            unplaced.Add(item);
 
-                            rejectStats[kv.Key] += kv.Value;
+                            if (!rejectMap.TryGetValue(item, out var itemRejects))
+                                continue;
+
+                            foreach (var kv in itemRejects)
+                            {
+                                if (!rejectStats.ContainsKey(kv.Key))
+                                    rejectStats[kv.Key] = 0;
+
+                                rejectStats[kv.Key] += kv.Value;
+                            }
                         }
-                        continue;
+
+                        break;
                     }
 
-                    ApplyPlacement(bestCandidate.Pallet, bestCandidate.Placement, rule, item, bestCandidate.DecisionNote);
+                    ApplyPlacement(bestCandidate.Pallet, bestCandidate.Placement, rule, selectedItem, bestCandidate.DecisionNote);
 
                     if (ShouldClosePallet(bestCandidate.Pallet))
                         bestCandidate.Pallet.IsClosed = true;
+
+                    remainingUnits.Remove(selectedItem);
                 }
             }
 
@@ -1021,6 +1081,10 @@
         {
             decimal newTop = Math.Max(pallet.CurrentTop, placement.Top);
             decimal remainVolume = pallet.Template.MaxValume - (pallet.Template.UseValume + placement.Item.Volume);
+            decimal layerAreaAfter = pallet.GetUsedFootprintAtLevel(placement.Z) + (placement.L * placement.W);
+            decimal layerFreeAreaAfter = Math.Max(0m, pallet.FootprintArea - layerAreaAfter);
+            decimal fillRatioAfter = pallet.FootprintArea <= 0 ? 0m : layerAreaAfter / pallet.FootprintArea;
+            bool opensNewLayer = placement.Z >= pallet.CurrentTop && pallet.NonPreloadedPlacementCount > 0;
 
             decimal centerX = pallet.Template.Lenght / 2m;
             decimal centerY = pallet.Template.Width / 2m;
@@ -1035,6 +1099,10 @@
             decimal travelPenalty = (placement.X + placement.Y) * 2m;
             decimal remainPenalty = remainVolume * 0.00001m;
             decimal utilizationReward = pallet.NonPreloadedPlacementCount * 250m;
+            decimal newLayerPenalty = opensNewLayer ? 5000m : 0m;
+            decimal layerWastePenalty = layerFreeAreaAfter * 0.02m;
+            decimal layerFillReward = fillRatioAfter * 3500m;
+            decimal footprintReward = placement.L * placement.W * 0.05m;
 
             return emptyPalletPenalty
                 + zPenalty
@@ -1042,6 +1110,10 @@
                 + travelPenalty
                 + distToCenterPenalty
                 + remainPenalty
+                + newLayerPenalty
+                + layerWastePenalty
+                - layerFillReward
+                - footprintReward
                 - utilizationReward;
         }
     }
@@ -1285,6 +1357,20 @@
         public decimal CurrentTop => Placements.Count == 0 ? BaseZ : Math.Max(BaseZ, Placements.Max(x => x.Top));
         public decimal TotalWeight => Template.UseWeight;
         public int NonPreloadedPlacementCount => Placements.Count(x => !x.IsPreloaded);
+        public decimal FootprintArea => Template.Lenght * Template.Width;
+
+        public decimal GetUsedFootprintAtLevel(decimal z) =>
+            Placements
+                .Where(x => x.Z == z)
+                .Sum(x => x.L * x.W);
+
+        public decimal GetFillRatioAtLevel(decimal z)
+        {
+            if (FootprintArea <= 0)
+                return 0m;
+
+            return GetUsedFootprintAtLevel(z) / FootprintArea;
+        }
 
         public void AddPlacement(Placement3D placement, bool isPreloaded, string debugNote)
         {
@@ -1504,45 +1590,45 @@
                     PalletId = 1,
                     PalletType = 101,
 
-                    Lenght = 130,
+                    Lenght = 120,
                     Width = 100,
                     MaxHeight = 160,
 
-                    MaxValume = 130m * 100m * 160m,
+                    MaxValume = 120m * 100m * 160m,
                     MaxWeight = 700,
                     UseValume = 0,
                     UseHeight = 0,
                     UseWeight = 0
                 },
-                new Pallets
-                {
-                    PalletId = 2,
-                    PalletType = 102,
-                    Lenght = 140,
-                    Width = 120,
-                    MaxHeight = 180,
-                    MaxValume = 140m * 120m * 180m,
-                    MaxWeight = 1000,
-                    UseValume = 0,
-                    UseHeight = 0,
-                    UseWeight = 0,
+                //new Pallets
+                //{
+                //    PalletId = 2,
+                //    PalletType = 102,
+                //    Lenght = 140,
+                //    Width = 120,
+                //    MaxHeight = 180,
+                //    MaxValume = 140m * 120m * 180m,
+                //    MaxWeight = 1000,
+                //    UseValume = 0,
+                //    UseHeight = 0,
+                //    UseWeight = 0,
 
-                },
-                new Pallets
-                {
-                    PalletId = 3,
-                    PalletType = 103,
+                //},
+                //new Pallets
+                //{
+                //    PalletId = 3,
+                //    PalletType = 103,
 
-                    Lenght = 100,
-                    Width = 80,
-                    MaxHeight = 140,
+                //    Lenght = 100,
+                //    Width = 80,
+                //    MaxHeight = 140,
 
-                    MaxValume = 100m * 80m * 140m,
-                    MaxWeight = 450,
-                    UseValume = 0,
-                    UseHeight = 0,
-                    UseWeight = 0
-                }
+                //    MaxValume = 100m * 80m * 140m,
+                //    MaxWeight = 450,
+                //    UseValume = 0,
+                //    UseHeight = 0,
+                //    UseWeight = 0
+                //}
             ];
         }
 
@@ -1555,11 +1641,30 @@
                     ItemNo = 10,
                     Weight = 12,
 
-                    Length = 60,
+                    Length = 50,
                     Width = 50,
                     Height = 20,
 
-                    Volume = 60m * 50m * 20m,
+                    Volume = 50m * 50m * 20m,
+                    Quantity = 10,
+                    ItemType = 1,
+                    ProdDate = new DateOnly(2026, 3, 1),
+                    ExpDate = new DateOnly(2027, 3, 1),
+                    ReceiptDate = new DateOnly(2026, 3, 4),
+                    ProdBatchNo = "A1",
+                    TrxB_id = 1,
+                    CDO_name = "STD"
+                },
+                 new Items
+                {
+                    ItemNo = 10,
+                    Weight = 12,
+
+                    Length = 10,
+                    Width = 50,
+                    Height = 20,
+
+                    Volume = 10m * 50m * 20m,
                     Quantity = 10,
                     ItemType = 1,
                     ProdDate = new DateOnly(2026, 3, 1),
