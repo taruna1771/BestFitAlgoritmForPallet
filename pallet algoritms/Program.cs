@@ -2237,35 +2237,35 @@
                     UseHeight = 0,
                     UseWeight = 0
                 },
-                new Pallets
-                {
-                    PalletId = 2,
-                    PalletType = 102,
-                    Lenght = 140,
-                    Width = 120,
-                    MaxHeight = 180,
-                    MaxValume = 140m * 120m * 180m,
-                    MaxWeight = 1000,
-                    UseValume = 0,
-                    UseHeight = 0,
-                    UseWeight = 0,
+                //new Pallets
+                //{
+                //    PalletId = 2,
+                //    PalletType = 102,
+                //    Lenght = 140,
+                //    Width = 120,
+                //    MaxHeight = 180,
+                //    MaxValume = 140m * 120m * 180m,
+                //    MaxWeight = 1000,
+                //    UseValume = 0,
+                //    UseHeight = 0,
+                //    UseWeight = 0,
 
-                },
-                new Pallets
-                {
-                    PalletId = 3,
-                    PalletType = 103,
+                //},
+                //new Pallets
+                //{
+                //    PalletId = 3,
+                //    PalletType = 103,
 
-                    Lenght = 100,
-                    Width = 80,
-                    MaxHeight = 140,
+                //    Lenght = 100,
+                //    Width = 80,
+                //    MaxHeight = 140,
 
-                    MaxValume = 100m * 80m * 140m,
-                    MaxWeight = 450,
-                    UseValume = 0,
-                    UseHeight = 0,
-                    UseWeight = 0
-                }
+                //    MaxValume = 100m * 80m * 140m,
+                //    MaxWeight = 450,
+                //    UseValume = 0,
+                //    UseHeight = 0,
+                //    UseWeight = 0
+                //}
             ];
         }
 
@@ -2282,8 +2282,8 @@
                     Width = 50,
                     Height = 20,
 
-                    Volume = 50m * 50m * 20m,
-                    Quantity = 10,
+                    Volume = 101m * 50m * 20m,
+                    Quantity = 102,
                     ItemType = 1,
                     ProdDate = new DateOnly(2026, 3, 1),
                     ExpDate = new DateOnly(2027, 3, 1),
@@ -2292,25 +2292,25 @@
                     TrxB_id = 1,
                     CDO_name = "STD1"
                 },
-                 new Items
-                {
-                    ItemNo = 11,
-                    Weight = 12,
+                // new Items
+                //{
+                //    ItemNo = 11,
+                //    Weight = 12,
 
-                    Length = 20,
-                    Width = 50,
-                    Height = 20,
+                //    Length = 20,
+                //    Width = 50,
+                //    Height = 20,
 
-                    Volume = 20m * 50m * 20m,
-                    Quantity = 10,
-                    ItemType = 3,
-                    ProdDate = new DateOnly(2026, 3, 1),
-                    ExpDate = new DateOnly(2027, 3, 1),
-                    ReceiptDate = new DateOnly(2026, 3, 4),
-                    ProdBatchNo = "A2",
-                    TrxB_id = 2,
-                    CDO_name = "STD2"
-                },
+                //    Volume = 20m * 50m * 20m,
+                //    Quantity = 10,
+                //    ItemType = 3,
+                //    ProdDate = new DateOnly(2026, 3, 1),
+                //    ExpDate = new DateOnly(2027, 3, 1),
+                //    ReceiptDate = new DateOnly(2026, 3, 4),
+                //    ProdBatchNo = "A2",
+                //    TrxB_id = 2,
+                //    CDO_name = "STD2"
+                //},
                 //new Items
                 //{
                 //    ItemNo = 11,
